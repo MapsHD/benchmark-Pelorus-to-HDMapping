@@ -1,0 +1,3 @@
+[submodule "src/pelorus"]
+	path = src/pelorus
+	url = https://github.com/uos/pelorus.git
