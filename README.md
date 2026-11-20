@@ -94,15 +94,19 @@ what the Bunker DVI dataset requires:
   read for deskewing. Pelorus' `LivoxMid360` layout expects the float64
   `timestamp` of livox_ros_driver2 clouds, which this bag does not have;
 - `imu.from_lidar_transform`: the Mid-360's IMU position in the LiDAR frame.
-  The default belongs to an Ouster sensor.
+  The default belongs to an Ouster sensor;
+- `preprocessing.filter.distance.range = 0.5m..`: points closer than the
+  Mid-360's blind zone (0.5 m, as in the benchmark's other Mid-360 setups) are
+  dropped. The default `4m..` is meant to remove "the robot itself" on the
+  author's platforms. reg-1 is indoors, and 91% of its points are closer than
+  4 m. With the default, about 1,800 of ~20,000 points per scan were left, and
+  the trajectory diverged after ~200 s.
 
 The Mid-360 IMU reports acceleration in g, not m/s². Pelorus scales every
 sample by 9.81 / (mean acceleration at start-up), so no conversion is needed.
 
-Everything else is the author's default. That includes the point filter
-`preprocessing.filter.distance.range = 4m..`, which drops every point closer
-than 4 m to the sensor ("usually the robot itself"). To change an option, copy
-the config, add the option and pass the copy:
+Everything else is the author's default (registration, map, noise values). To
+change an option, copy the config, add the option and pass the copy:
 
 ```bash
 cp overlay/config/pelorus_bunker.rl my.rl   # edit my.rl
