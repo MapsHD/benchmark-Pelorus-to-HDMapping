@@ -108,6 +108,10 @@ RUN RERUN_BIN=$(python3 -c "import importlib.util, os; print(os.path.join(os.pat
 from rosbags.typesys import Stores, get_typestore; ts = get_typestore(Stores.ROS2_HUMBLE); \
 ts.types['sensor_msgs/msg/PointCloud2']; ts.types['nav_msgs/msg/Odometry']; print('[build] converter deps OK')" && \
     pelorus config verify /pelorus_ws/config/pelorus_bunker.rl && echo "[build] pelorus_bunker.rl is valid" && \
-    test -f /pelorus_ws/scripts/pelorus_bench.py && test -f /pelorus_ws/scripts/pelorus_to_hdmapping.py
+    test -f /pelorus_ws/scripts/pelorus_bench.py && test -f /pelorus_ws/scripts/pelorus_to_hdmapping.py && \
+    python3 -c "import sys; sys.path.insert(0, '/pelorus_ws/scripts'); \
+import livox_raw_to_mcap, pelorus_bench, pelorus_to_hdmapping; \
+from rosbags.rosbag1 import Reader; from rosbags.rosbag2 import Writer, StoragePlugin; \
+print('[build] bench scripts and the raw-bag converter import OK')"
 
 CMD ["bash"]

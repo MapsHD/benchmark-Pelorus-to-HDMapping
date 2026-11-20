@@ -1,21 +1,25 @@
 #!/bin/bash
-# Runs Pelorus on a ROS 2 bag and converts the result to an HDMapping session.
+# Runs Pelorus on a bag and converts the result to an HDMapping session.
 #
 # Pelorus runs OFFLINE (`pelorus offline`), like PIN-SLAM and KISS-SLAM: its
-# bag player Minot reads the ROS 2 bag directly and releases the next scan only
+# bag player Minot reads an MCAP bag directly and releases the next scan only
 # when the previous one is registered, so there is no ROS, no playback in real
 # time, no dropped scan, and every output is stamped with bag time. Pelorus
 # writes its registered clouds and odometry to an MCAP; the converter turns
 # that into the HDMapping session. Live progress is shown in a Rerun viewer
 # (instead of RViz).
 #
-# Minot 0.15.2 cannot replay a sqlite3 (.db3) bag in this mode (Pelorus never
-# gets past its IMU initialization), so a .db3 input such as reg-1-ros2 is
-# first copied, the two topics Pelorus reads only, into an MCAP bag under
-# <output_dir>/pelorus-input/. Later runs reuse it.
+# Input: the raw ROS 1 bag (reg-1.bag) or the ROS 2 bag directory (reg-1-ros2).
+# Pelorus reads PointCloud2 from an MCAP bag, so the input is first converted
+# into one under <output_dir>/pelorus-input/, which later runs reuse:
+# - reg-1.bag: the Livox CustomMsg become PointCloud2 clouds exactly as
+#   livox_bag_aggregate makes them (reg-1.bag-pc.bag), plus /livox/imu;
+# - reg-1-ros2 (sqlite3 .db3): its two topics are copied. Minot 0.15.2 cannot
+#   replay a .db3 bag in this mode (Pelorus never gets past its IMU
+#   initialization).
 #
 # Usage:
-#   ./docker_session_run-pelorus.sh <ros2_bag_dir> <output_dir>
+#   ./docker_session_run-pelorus.sh <reg-1.bag | ros2_bag_dir> <output_dir>
 #
 # Environment variables:
 #   CONFIG_FILE         - Pelorus config (Ratslang .rl) on the host
@@ -45,8 +49,9 @@ LIBGL_SW="${LIBGL_SW:-0}"
 
 usage() {
   echo "Usage:"
-  echo "  $0 <ros2_bag_dir> <output_dir>"
+  echo "  $0 <reg-1.bag | ros2_bag_dir> <output_dir>"
   echo
+  echo "  reg-1.bag    : raw ROS 1 bag with /livox/lidar (Livox CustomMsg) and /livox/imu"
   echo "  ros2_bag_dir : ROS 2 bag directory with /livox/pointcloud and /livox/imu (e.g. reg-1-ros2)"
   echo
   echo "If no arguments are provided, a GUI file selector will be used."
@@ -73,7 +78,7 @@ elif [[ $# -eq 0 ]]; then
     echo "Error: zenity is not available"
     exit 1
   }
-  DATASET_HOST_PATH=$(zenity --file-selection --directory --title="Select the ROS 2 bag directory")
+  DATASET_HOST_PATH=$(zenity --file-selection --title="Select the ROS 1 bag (reg-1.bag)")
   OUTPUT_HOST_DIR=$(zenity --file-selection --directory --title="Select output directory")
 else
   usage

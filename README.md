@@ -8,8 +8,9 @@ Download the dataset from [Bunker DVI Dataset](https://charleshamesse.github.io/
 
 # benchmark-Pelorus-to-HDMapping
 
-Runs [Pelorus](https://github.com/uos/pelorus) on a ROS 2 bag and converts the
-output to an [HDMapping](https://github.com/MapsHD/HDMapping) session.
+Runs [Pelorus](https://github.com/uos/pelorus) on a ROS 1 or ROS 2 bag and
+converts the output to an [HDMapping](https://github.com/MapsHD/HDMapping)
+session.
 
 Pelorus (C. Sieh and M. Porrmann, "Pelorus: Resource-Aware Lidar-Inertial
 Odometry", [arXiv:2611.22850](https://arxiv.org/abs/2611.22850), 2026) is a
@@ -25,23 +26,35 @@ The submodule `src/pelorus` is pinned to the release tag `v0.1.0` (commit
 ## Prerequisites
 
 - Docker
-- A ROS 2 bag directory (or an `.mcap` file) with a `sensor_msgs/PointCloud2`
-  topic and a `sensor_msgs/Imu` topic. Pelorus deskews the scans with a
-  per-point time field, whose layout is chosen in the config (`lidar.vendor`).
+- One of:
+  - the raw ROS 1 bag `reg-1.bag`, with the Livox LiDAR as `CustomMsg` on
+    `/livox/lidar` and its IMU on `/livox/imu`;
+  - a ROS 2 bag directory, such as `reg-1-ros2` from the benchmark's step 1,
+    with a `sensor_msgs/PointCloud2` topic and a `sensor_msgs/Imu` topic;
+  - an `.mcap` file with those two topics.
 
 Pelorus needs no ROS here: it runs in its offline mode, and its bag player
-[Minot](https://minot.steado.tech/docs/) reads the bag directly. For the
-Bunker DVI dataset, the benchmark's step 1 converts `reg-1.bag` into the ROS 2
-bag `reg-1-ros2` (the Livox scans aggregated to `PointCloud2` on
-`/livox/pointcloud`, plus `/livox/imu`).
+[Minot](https://minot.steado.tech/docs/) reads an MCAP bag directly. Pelorus
+deskews the scans with a per-point time field, whose layout is chosen in the
+config (`lidar.vendor`).
 
-`reg-1-ros2` is stored as sqlite3 (`.db3`). With such a bag, Minot 0.15.2
-never gets Pelorus past its IMU initialization, so no scan is ever played. The
-same data as MCAP, the format of the author's own examples, runs through.
-The run therefore first copies the two topics Pelorus reads into an MCAP bag
-with `rosbags-convert`, which changes no message. The copy goes to
-`<output_dir>/pelorus-input/<bag>-mcap` (about 1.7 GB for reg-1). Later runs
-reuse it as long as the source bag is unchanged.
+Before Pelorus starts, the run converts the input into an MCAP bag with only
+the two topics Pelorus reads. The bag goes to
+`<output_dir>/pelorus-input/<input>-mcap` (about 1.7 GB for reg-1), and later
+runs reuse it as long as the input is unchanged:
+- **`reg-1.bag`**: Pelorus cannot read Livox `CustomMsg`.
+  [overlay/scripts/livox_raw_to_mcap.py](overlay/scripts/livox_raw_to_mcap.py)
+  builds the `PointCloud2` clouds on `/livox/pointcloud` exactly as
+  [livox_bag_aggregate](https://github.com/MapsHD/livox_bag_aggregate) builds
+  `reg-1.bag-pc.bag` (0.1 s windows; fields x, y, z, intensity, tag, line,
+  time) and copies `/livox/imu`. On reg-1 the clouds are identical to
+  `reg-1.bag-pc.bag`'s (checked on the first 30 s: 290 of 290 clouds).
+- **A ROS 2 bag stored as sqlite3 (`.db3`)**, like `reg-1-ros2`: Minot 0.15.2
+  never gets Pelorus past its IMU initialization with such a bag, so no scan
+  is ever played. The same data as MCAP, the format of the author's own
+  examples, runs through. The two topics are copied with `rosbags-convert`,
+  which changes no message.
+- **An MCAP bag or file** is used as it is.
 
 ## Step 1 — Clone with submodules
 
@@ -70,10 +83,13 @@ The build ends with a check that Pelorus accepts the benchmark config.
 
 ```bash
 chmod +x docker_session_run-pelorus.sh
-./docker_session_run-pelorus.sh /path/to/ros2_bag_dir /path/to/output/dir
+./docker_session_run-pelorus.sh /path/to/reg-1.bag /path/to/output/dir
+# or a ROS 2 bag directory:
+./docker_session_run-pelorus.sh /path/to/reg-1-ros2 /path/to/output/dir
 ```
 
-With no arguments, a GUI file selector is used (requires `zenity`).
+With no arguments, a GUI file selector for the ROS 1 bag is used (requires
+`zenity`).
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
@@ -110,14 +126,16 @@ change an option, copy the config, add the option and pass the copy:
 
 ```bash
 cp overlay/config/pelorus_bunker.rl my.rl   # edit my.rl
-CONFIG_FILE=my.rl ./docker_session_run-pelorus.sh /path/to/ros2_bag_dir /path/to/output/dir
+CONFIG_FILE=my.rl ./docker_session_run-pelorus.sh /path/to/reg-1.bag /path/to/output/dir
 ```
 
 `docker run --rm pelorus_standalone pelorus config generate full` prints every
 option with its documentation.
 
-Before anything starts, the script checks that the config's two topics are in
-the bag, with the right message types.
+Before anything starts, the script checks that the bag holds the topics it
+needs, with the right message types: `/livox/lidar` (Livox `CustomMsg`) and
+the config's IMU topic in a ROS 1 bag, or the config's two topics in a ROS 2
+bag.
 
 **What happens:**
 
@@ -181,9 +199,8 @@ Pelorus' own results stay in `<output_dir>/pelorus-results/<timestamp>/`
 - `trajectory_tum.txt`;
 - `pelorus.rl`: a copy of the config used.
 
-The log is in `<output_dir>/logs/pelorus.log`. The MCAP copy of a `.db3` input
-stays in `<output_dir>/pelorus-input/` for the next run; delete it to free the
-space.
+The log is in `<output_dir>/logs/pelorus.log`. The converted input stays in
+`<output_dir>/pelorus-input/` for the next run; delete it to free the space.
 
 ## Notes on Pelorus
 

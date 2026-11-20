@@ -2,10 +2,15 @@
 """Runs Pelorus offline on a ROS 2 bag and converts the result to an HDMapping session.
 
 Stages, each reporting its own failure:
-  1. Input check (exit 42, nothing run): a ROS 2 bag directory (or .mcap file)
-     holding the point cloud and IMU topics named in the Pelorus config.
-     A sqlite3 (.db3) bag is first copied, those two topics only, into an MCAP
-     bag (see mcap_input), which later runs reuse.
+  1. Input check (exit 42, nothing run), then the bag Pelorus reads:
+     - a raw ROS 1 bag (reg-1.bag) with Livox CustomMsg and IMU: converted to
+       an MCAP bag of PointCloud2 + IMU, the clouds built as livox_bag_aggregate
+       builds them (livox_raw_to_mcap.py);
+     - a ROS 2 bag directory (reg-1-ros2) holding the point cloud and IMU
+       topics named in the Pelorus config: a sqlite3 (.db3) bag is copied,
+       those two topics only, into an MCAP bag; an MCAP bag is used as it is;
+     - an .mcap file: used as it is.
+     Converted bags are kept for later runs (see mcap_input).
   2. Viewer (optional): a Rerun viewer in its own process. GPU rendering is
      tried first, then software rendering, then no viewer. Pelorus runs the
      same in every case, and a viewer that dies later only loses the picture.
@@ -29,6 +34,7 @@ import threading
 import time
 import traceback
 from datetime import datetime
+from pathlib import Path
 
 EXIT_INPUT = 42
 VIEWER_HOST = "127.0.0.1"
@@ -101,14 +107,45 @@ def bag_topics(bag):
         raise RuntimeError(f"cannot read {meta_path}: {e}") from e
 
 
-def check_input(bag, lidar_topic, imu_topic):
+def check_ros1_input(bag, livox_topic, imu_topic):
+    """Returns the number of Livox CustomMsg in a raw ROS 1 bag. Exits 42 on a bad input."""
+    try:
+        from rosbags.rosbag1 import Reader
+
+        with Reader(Path(bag)) as reader:
+            topics = {name: (info.msgtype, info.msgcount) for name, info in reader.topics.items()}
+    except Exception as e:  # rosbags raises several types for a file that is no ROS 1 bag
+        log(f"ERROR: cannot read {bag} as a ROS 1 bag: {type(e).__name__}: {e}")
+        sys.exit(EXIT_INPUT)
+    problems = []
+    lidar_type = topics.get(livox_topic, (None, 0))[0] or ""
+    if not lidar_type.endswith("/msg/CustomMsg"):
+        problems.append(f"topic {livox_topic} (Livox CustomMsg) is not in the bag"
+                        + (f", it is {lidar_type}" if lidar_type else ""))
+    if topics.get(imu_topic, (None, 0))[0] != "sensor_msgs/msg/Imu":
+        problems.append(f"topic {imu_topic} (sensor_msgs/Imu) is not in the bag")
+    if problems:
+        for p in problems:
+            log(f"ERROR: {p}")
+        log("Topics in the bag:")
+        for name, (typ, count) in sorted(topics.items()):
+            log(f"  {name}  {typ}  ({count} messages)")
+        sys.exit(EXIT_INPUT)
+    n = topics[livox_topic][1]
+    log(f"input OK: ROS 1 bag, {n} Livox CustomMsg on {livox_topic}, "
+        f"{topics[imu_topic][1]} IMU messages on {imu_topic}")
+    return n
+
+
+def check_input(bag, lidar_topic, imu_topic, livox_topic):
     """Returns the number of point clouds in the bag (0 = unknown). Exits 42 on a bad input."""
     if os.path.isfile(bag) and bag.endswith(".mcap"):
         log(f"input is an MCAP file; topics are not checked before the run")
         return 0
+    if os.path.isfile(bag) and bag.endswith(".bag"):
+        return check_ros1_input(bag, livox_topic, imu_topic)
     if os.path.isfile(bag):
-        log(f"ERROR: {bag} is a file, Pelorus needs a ROS 2 bag directory (e.g. reg-1-ros2) or an .mcap file.")
-        log("A ROS 1 bag is converted in step 1 of the benchmark (reg-1.bag -> reg-1-ros2).")
+        log(f"ERROR: {bag} is neither a ROS 1 .bag, an .mcap file nor a ROS 2 bag directory.")
         sys.exit(EXIT_INPUT)
     if not os.path.isdir(bag) or not os.path.isfile(os.path.join(bag, "metadata.yaml")):
         log(f"ERROR: {bag} is not a ROS 2 bag directory (no metadata.yaml).")
@@ -137,39 +174,51 @@ def check_input(bag, lidar_topic, imu_topic):
     return n_clouds
 
 
-def source_signature(bag, lidar_topic, imu_topic):
+def source_signature(bag, *topics):
     """Names, sizes and modification times of the bag's files, plus the topics."""
+    paths = [bag] if os.path.isfile(bag) else [os.path.join(bag, n) for n in sorted(os.listdir(bag))]
     entries = []
-    for name in sorted(os.listdir(bag)):
-        st = os.stat(os.path.join(bag, name))
-        entries.append(f"{name} {st.st_size} {st.st_mtime_ns}")
-    return "\n".join(entries + [f"topics {lidar_topic} {imu_topic}"]) + "\n"
+    for path in paths:
+        st = os.stat(path)
+        entries.append(f"{os.path.basename(path)} {st.st_size} {st.st_mtime_ns}")
+    return "\n".join(entries + ["topics " + " ".join(topics)]) + "\n"
 
 
-def mcap_input(bag, lidar_topic, imu_topic, cache_root):
-    """The bag Pelorus reads: an MCAP copy of a sqlite3 (.db3) bag, else the bag itself.
+def mcap_input(bag, lidar_topic, imu_topic, livox_topic, cache_root):
+    """The bag Pelorus reads: an MCAP bag made from a raw ROS 1 bag or a
+    sqlite3 (.db3) bag, else the bag itself.
+
+    A raw ROS 1 bag (reg-1.bag) holds the LiDAR as Livox CustomMsg, which
+    Pelorus cannot read; livox_raw_to_mcap.py builds the PointCloud2 clouds
+    as livox_bag_aggregate does and writes them with the IMU.
 
     With a .db3 bag (reg-1-ros2), Minot 0.15.2's lockstep replay never gets
     Pelorus past the IMU initialization: Pelorus acknowledged 16384 IMU
     messages and never saw their stamps advance by 100 ms, although the bag's
     stamps are monotonic at 200 Hz. The same two topics as an MCAP bag (the
     format of the author's own examples) replay correctly. The copy is made
-    with rosbags-convert, which changes no message, and is reused while the
-    source bag is unchanged.
+    with rosbags-convert, which changes no message.
+
+    Either result is kept and reused while the source bag is unchanged.
     """
-    if os.path.isfile(bag):
+    ros1 = os.path.isfile(bag) and bag.endswith(".bag")
+    if os.path.isfile(bag) and not ros1:
         return bag
-    try:
-        _, storage = bag_topics(bag)
-    except RuntimeError as e:
-        log(f"WARNING: {e}; the bag is passed to Pelorus as it is")
-        return bag
-    if storage != "sqlite3":
-        return bag
+    if not ros1:
+        try:
+            _, storage = bag_topics(bag)
+        except RuntimeError as e:
+            log(f"WARNING: {e}; the bag is passed to Pelorus as it is")
+            return bag
+        if storage != "sqlite3":
+            return bag
     name = os.path.basename(os.path.normpath(bag))
+    if ros1:
+        name = name[: -len(".bag")]
     dst = os.path.join(cache_root, f"{name}-mcap")
     stamp_file = dst + ".source"
-    signature = source_signature(bag, lidar_topic, imu_topic)
+    signature = (source_signature(bag, livox_topic, lidar_topic, imu_topic) if ros1
+                 else source_signature(bag, lidar_topic, imu_topic))
     try:
         with open(stamp_file) as f:
             if f.read() == signature and os.path.isfile(os.path.join(dst, "metadata.yaml")):
@@ -187,17 +236,35 @@ def mcap_input(bag, lidar_topic, imu_topic, cache_root):
     if os.path.exists(stamp_file):
         os.remove(stamp_file)
     os.makedirs(staging, exist_ok=True)
-    cmd = ["rosbags-convert", "--src", bag, "--dst", tmp, "--dst-storage", "mcap",
-           "--include-topic", lidar_topic, imu_topic]
-    log(f"input: Minot cannot replay this sqlite3 bag; copying {lidar_topic} and {imu_topic} "
-        f"into an MCAP bag (once; later runs reuse it): {' '.join(cmd)}")
     started = time.time()
-    try:
-        status = subprocess.run(cmd).returncode
-    except OSError as e:
-        raise RuntimeError(f"cannot run rosbags-convert: {e}") from e
-    if status != 0 or not os.path.isfile(os.path.join(tmp, "metadata.yaml")):
-        raise RuntimeError(f"rosbags-convert failed (exit {status}); see the messages above")
+    if ros1:
+        log(f"input: converting the Livox CustomMsg on {livox_topic} to PointCloud2 on {lidar_topic} "
+            f"(as livox_bag_aggregate) and copying {imu_topic} into an MCAP bag (once; later runs reuse it)")
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import livox_raw_to_mcap
+        except Exception as e:
+            raise RuntimeError(f"cannot load livox_raw_to_mcap.py: {type(e).__name__}: {e}") from e
+        try:
+            livox_raw_to_mcap.convert(bag, tmp, livox_topic, lidar_topic, imu_topic)
+        except livox_raw_to_mcap.ConversionError as e:
+            raise RuntimeError(str(e)) from e
+        except Exception as e:  # rosbags/numpy raise several types; report, never crash
+            traceback.print_exc()
+            raise RuntimeError(f"the conversion of {bag} failed: {type(e).__name__}: {e}") from e
+    else:
+        cmd = ["rosbags-convert", "--src", bag, "--dst", tmp, "--dst-storage", "mcap",
+               "--include-topic", lidar_topic, imu_topic]
+        log(f"input: Minot cannot replay this sqlite3 bag; copying {lidar_topic} and {imu_topic} "
+            f"into an MCAP bag (once; later runs reuse it): {' '.join(cmd)}")
+        try:
+            status = subprocess.run(cmd).returncode
+        except OSError as e:
+            raise RuntimeError(f"cannot run rosbags-convert: {e}") from e
+        if status != 0:
+            raise RuntimeError(f"rosbags-convert failed (exit {status}); see the messages above")
+    if not os.path.isfile(os.path.join(tmp, "metadata.yaml")):
+        raise RuntimeError(f"the conversion wrote no bag in {tmp}")
     os.rename(tmp, dst)
     shutil.rmtree(staging, ignore_errors=True)
     with open(stamp_file, "w") as f:
@@ -376,7 +443,8 @@ def run_pelorus(bag, config, results_dir, total_clouds, rerun_on):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--bag", required=True, help="ROS 2 bag directory (or .mcap file)")
+    ap.add_argument("--bag", required=True, help="raw ROS 1 bag, ROS 2 bag directory or .mcap file")
+    ap.add_argument("--livox-topic", default="/livox/lidar", help="Livox CustomMsg topic of a raw ROS 1 bag")
     ap.add_argument("--config", required=True, help="Pelorus Ratslang config")
     ap.add_argument("--out-root", required=True, help="parent of the timestamped results directories")
     ap.add_argument("--session", required=True, help="output HDMapping session directory")
@@ -394,11 +462,12 @@ def main():
         else:
             lidar_topic, imu_topic = config_topics(args.config)
             log(f"config {args.config}: lidar.topic {lidar_topic}, imu.topic {imu_topic}")
-            total = check_input(args.bag, lidar_topic, imu_topic)
+            total = check_input(args.bag, lidar_topic, imu_topic, args.livox_topic)
 
             out_parent = os.path.dirname(args.out_root.rstrip("/")) or "."
             try:
-                run_bag = mcap_input(args.bag, lidar_topic, imu_topic, os.path.join(out_parent, "pelorus-input"))
+                run_bag = mcap_input(args.bag, lidar_topic, imu_topic, args.livox_topic,
+                                     os.path.join(out_parent, "pelorus-input"))
             except (RuntimeError, OSError) as e:
                 log(f"ERROR: preparing the input failed: {e}")
                 return 1
