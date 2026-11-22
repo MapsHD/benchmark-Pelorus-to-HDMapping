@@ -25,6 +25,8 @@ lidar {
 # left about 1,800 of ~20,000 points per scan, and the trajectory diverged
 # after ~200 s (run of 2026-11-20).
 preprocessing.filter.distance.range = 0.5m..
+registration.map.resolution = 20cm
+parallelism.num_threads = 4
 
 imu {
   # The Mid-360's built-in IMU. Its acceleration is in g, not m/s^2; Pelorus
